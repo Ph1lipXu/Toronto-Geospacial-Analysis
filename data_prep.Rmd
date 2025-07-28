@@ -1,0 +1,112 @@
+---
+title: "data_prep"
+author: "Zikang Ge"
+date: "2025-07-28"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(sf)
+library(httr)
+library(dplyr)
+library(readr)
+library(readxl)
+library(tidyr)
+library(janitor)
+library(zoo)
+library(stringr)
+library(tidyverse)
+library(tibble)
+```
+
+# Preparation & Preprocessing
+## Download Data
+```{r}
+census_data_url <- "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/6678e1a6-d25f-4dff-b2b7-aa8f042bc2eb/resource/16a31e1d-b4d9-4cf0-b5b3-2e3937cb4121/download/2023-WardProfiles-2011-2021-CensusData.xlsx"
+
+ward_names_url <- "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/6678e1a6-d25f-4dff-b2b7-aa8f042bc2eb/resource/ea4cc466-bd4d-40c6-a616-7abfa9d7398f/download/25-WardNames-Numbers.xlsx"
+
+census_data <- "census_data.xlsx"
+ward_names <- "ward_names.xlsx"
+
+download.file(census_data_url, destfile = census_data, mode = "wb")
+download.file(ward_names_url, destfile = ward_names, mode = "wb")
+```
+
+```{r}
+census_data_df <- read_excel(census_data, sheet = 1)
+ward_names_df <- read_excel(ward_names)
+```
+
+## Fix wrong header rows and slice subtables
+```{r}
+# Preprocess due to mismatch in the raw dataset
+new_row <- census_data_df[1436, ]
+new_row[1] <- "Gender: Total"
+new_row[2:ncol(new_row)] <- NA
+
+census_data_df <- bind_rows(
+  census_data_df[1:1434, ],  # rows 1 to 1434
+  new_row,           # the new inserted row
+  census_data_df[1435:nrow(census_data_df), ]  # rows 1436 to end
+)
+
+census_data_df[1436, 1] <- ""
+```
+
+```{r}
+# Find header rows (starts with Toronto, Ward 1, Ward 2, ...)
+header_rows <- which(census_data_df[[2]] == "Toronto")
+print(header_rows)
+
+titles <- sapply(header_rows, function(h) {
+  val <- census_data_df[[1]][h - 1]
+  if (!is.na(val) && is.character(val) && nzchar(val)) {
+    return(as.character(val))
+  } else {
+    return(NA_character_)
+  }
+})
+
+titles <- zoo::na.locf(titles, na.rm = FALSE)
+```
+
+```{r}
+tables <- list()
+
+for (i in seq_along(header_rows)) {
+  start_row <- header_rows[i] + 1
+  end_row <- if (i < length(header_rows)) header_rows[i + 1] - 2 else nrow(census_data_df)
+  
+  sub <- census_data_df[start_row:end_row, ]
+  colnames(sub) <- as.character(census_data_df[header_rows[i], ])
+  sub$subtable_name <- titles[i]
+  tables[[i]] <- sub
+}
+
+df <- bind_rows(tables)
+```
+
+## Map Wards into Real Ward Names
+```{r}
+ward_map <- setNames(ward_names_df$`Ward Name`, paste("Ward", ward_names_df$`Ward Number`))
+
+colnames(df) <- sapply(colnames(df), function(col) {
+  if (col %in% names(ward_map)) {
+    ward_map[[col]]
+  } else {
+    col
+  }
+})
+
+df <- df[rowSums(is.na(df)) < 5, ]
+```
+
+```{r}
+head(df)
+```
+
