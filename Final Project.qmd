@@ -1,0 +1,210 @@
+---
+title: "6500 Final Project"
+format: pdf
+editor: visual
+---
+
+# Load libraries
+
+```{r, echo=FALSE, include=FALSE}
+library(osmdata)
+library(sf)
+library(tmap)
+library(spatstat)
+library(terra)
+library(dplyr)
+
+```
+
+
+# Mapping Grocery stores and Residential Areas
+```{r}
+toronto_bb <- getbb("Toronto, Ontario, Canada")
+
+grocery_osm <- opq(bbox = toronto_bb) %>%
+  add_osm_feature(key = "shop", value = c("supermarket", "convenience", "greengrocer")) %>%
+  osmdata_sf()
+
+
+
+```
+
+```{r}
+
+# Extract point features (some stores are points, some are polygons)
+grocery_pts <- grocery_osm$osm_points
+
+# Optional: extract centroids of polygons
+grocery_polys <- st_centroid(grocery_osm$osm_polygons)
+
+# Combine
+grocery_all <- bind_rows(
+  grocery_pts %>% select(osm_id, name, geometry),
+  grocery_polys %>% select(osm_id, name, geometry)
+)
+
+```
+
+
+```{r}
+# Create sf polygon from bbox
+bbox_sf <- st_as_sfc(st_bbox(grocery_all)) %>%
+  st_transform(32617)  # UTM for Toronto
+
+# Major roads in Toronto
+streets_osm <- opq(bbox = bbox_sf %>% st_transform(4326) %>% st_bbox()) %>%
+  add_osm_feature(key = "highway", 
+                  value = c("primary", "secondary", "tertiary", "residential")) %>%
+  osmdata_sf()
+
+streets_utm <- st_transform(streets_osm$osm_lines, 32617)
+
+# Rivers or water
+water_osm <- opq(bbox = bbox_sf %>% st_transform(4326) %>% st_bbox()) %>%
+  add_osm_feature(key = "waterway", value = c("river", "stream")) %>%
+  osmdata_sf()
+
+rivers_utm <- st_transform(water_osm$osm_lines, 32617)
+
+# Residential areas
+residential_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "landuse", value = "residential") |>
+  osmdata_sf()
+
+residential_polys <- bind_rows(
+  residential_osm$osm_polygons,
+  residential_osm$osm_multipolygons
+) |>
+  st_make_valid() |>           
+  st_transform(32617) |>
+  select(osm_id, geometry) |>
+  distinct()
+
+residential_polys <- residential_polys |> 
+  filter(!st_is_empty(geometry)) |> 
+  filter(st_is_valid(geometry))
+
+
+tmap_mode("plot")
+
+tm_shape(bbox_sf) +
+  tm_borders(lwd = 1.5, col = "black", alpha = 0.2) +
+
+  tm_shape(rivers_utm) +
+  tm_lines(col = "lightblue", lwd = 0.8) +
+
+  tm_shape(streets_utm) +
+  tm_lines(col = "grey80", lwd = 0.6) +
+
+
+tm_shape(residential_polys) +
+  tm_fill(col = "red", alpha = 0.4, border.col = NA) +
+
+
+  tm_shape(grocery_all) +
+  tm_dots(col = "darkgreen",
+          size = 0.04,
+          border.col = "black",
+          fill.alpha = 0.8,
+          title = "Grocery Stores") +
+
+  tm_layout(
+    title = "Grocery Store Locations in Toronto",
+    title.size = 1.2,
+    legend.position = c("right", "top"),
+    frame = FALSE,
+    bg.color = "white"
+  )
+
+```
+
+# KDE
+
+```{r}
+coords <- st_coordinates(grocery_all)
+
+# Define a window from Toronto bounding box
+study_win <- as.owin(bbox_sf)
+
+# Create ppp object
+grocery_ppp <- ppp(x = coords[,1], y = coords[,2], window = study_win)
+
+
+```
+
+```{r}
+quadrat_test <- quadrat.test(grocery_ppp, nx = 5, ny = 5)
+plot(grocery_ppp, main = "Quadrat Test")
+plot(quadrat_test, add = TRUE)
+print(quadrat_test)
+
+```
+```{r}
+K <- Kest(grocery_ppp)
+L <- Lest(grocery_ppp)
+
+plot(L, main = "L-Function for Grocery Store Pattern")
+abline(h = 0, col = "red", lty = 2)
+
+
+
+```
+
+```{r}
+# Bandwidth: can tune manually, or use bw.diggle
+grocery_kde <- density.ppp(grocery_ppp, sigma = 800, edge = TRUE)
+
+# Convert to SpatRaster for tmap
+kde_raster <- rast(as.im(grocery_kde))
+crs(kde_raster) <- "EPSG:32617"
+
+
+tm_shape(kde_raster) +
+  tm_raster(style = "cont", palette = "YlOrRd", alpha = 0.6, title = "Store Density") +
+  tm_shape(grocery_all) +
+  tm_dots(col = "darkgreen", size = 0.04, border.col = "black", fill.alpha = 0.8) +
+  tm_layout(
+    title = "KDE of Grocery Stores",
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+
+
+```
+```{r}
+toronto_admin <- opq(bbox = toronto_bb) |>
+  add_osm_feature(key = "boundary", value = "administrative") |>
+  osmdata_sf()
+
+# Combine multipolygons and polygons
+admin_all <- bind_rows(
+  toronto_admin$osm_multipolygons,
+  toronto_admin$osm_polygons
+)
+
+# Filter: likely neighborhood-level boundaries
+neighborhoods <- admin_all |>
+  filter(admin_level %in% c("9"), name != "Toronto") |>
+  st_transform(32617)  # Match your other data
+
+tmap_mode("plot")
+
+tm_shape(neighborhoods) +
+  tm_borders(lwd = 1, col = "black") +
+  tm_text("name", size = 0.5, auto.placement = TRUE) +
+  tm_layout(title = "Toronto Neighborhoods / Wards")
+
+```
+
+```{r}
+table(neighborhoods$admin_level)
+
+
+```
+
+
+
+
+
+
+
