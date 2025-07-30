@@ -17,13 +17,27 @@ library(dplyr)
 ```
 
 
+
+
+
 # Mapping Grocery stores and Residential Areas
 ```{r}
-toronto_bb <- getbb("Toronto, Ontario, Canada")
+toronto_admin <- opq(bbox = getbb("Toronto, Ontario, Canada")) %>%
+  add_osm_feature(key = "admin_level", value = "6") %>%
+  add_osm_feature(key = "name", value = "Toronto") %>%
+  osmdata_sf()
+
+toronto_boundaries <- toronto_admin$osm_multipolygons %>%
+  filter(name == "Toronto") %>%
+  st_transform(32617)
+
+# Get grocery stores within Toronto boundaries only
+toronto_bb <- st_bbox(st_transform(toronto_boundaries, 4326))
 
 grocery_osm <- opq(bbox = toronto_bb) %>%
   add_osm_feature(key = "shop", value = c("supermarket", "convenience", "greengrocer")) %>%
   osmdata_sf()
+
 
 
 
@@ -66,6 +80,19 @@ water_osm <- opq(bbox = bbox_sf %>% st_transform(4326) %>% st_bbox()) %>%
 
 rivers_utm <- st_transform(water_osm$osm_lines, 32617)
 
+#Green spaces
+greenspaces_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "leisure", value = "park") |>
+  osmdata_sf()
+
+greenspace_polys <- bind_rows(
+  greenspaces_osm$osm_polygons,
+  greenspaces_osm$osm_multipolygons
+) |>
+  st_transform(32617) |>
+  select(osm_id, name, geometry) |>
+  distinct()
+
 # Residential areas
 residential_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
   add_osm_feature(key = "landuse", value = "residential") |>
@@ -84,6 +111,34 @@ residential_polys <- residential_polys |>
   filter(!st_is_empty(geometry)) |> 
   filter(st_is_valid(geometry))
 
+#Commercial areas
+commercial_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "landuse", value = c("commercial", "industrial", "retail")) |>
+  osmdata_sf()
+
+commercial_building_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "building", value = c("commercial", "office")) |>
+  osmdata_sf()
+
+commercial_polys <- bind_rows(
+  commercial_osm$osm_polygons,
+  commercial_osm$osm_multipolygons
+) |>
+  st_make_valid() |>           
+  st_transform(32617) |>
+  select(osm_id, geometry) |>
+  distinct()
+
+commercial_building_polys <- bind_rows(
+  commercial_building_osm$osm_polygons,
+  commercial_building_osm$osm_multipolygons
+) |>
+  st_make_valid() |>           
+  st_transform(32617) |>
+  select(osm_id, geometry) |>
+  distinct()
+
+
 
 tmap_mode("plot")
 
@@ -95,15 +150,28 @@ tm_shape(bbox_sf) +
 
   tm_shape(streets_utm) +
   tm_lines(col = "grey80", lwd = 0.6) +
+  
+  tm_shape(greenspace_polys) +
+   tm_polygons(col = "darkgreen", 
+              fill_alpha = 0.6, 
+              border.col = "darkgreen", 
+              lwd = 0.6) +
+
 
 
 tm_shape(residential_polys) +
-  tm_fill(col = "red", alpha = 0.4, border.col = NA) +
-
+  tm_fill(col = "grey20", alpha = 0.4, border.col = NA) +
+  
+   tm_shape(commercial_polys) +
+  tm_fill(col = "yellow",alpha = 0.4, border.col = NA) +
+  
+   tm_shape(commercial_building_polys) +
+  tm_fill(col = "yellow",alpha = 0.4, border.col = NA) +
+  
 
   tm_shape(grocery_all) +
-  tm_dots(col = "darkgreen",
-          size = 0.04,
+  tm_dots(col = "red",
+          size = 0.1,
           border.col = "black",
           fill.alpha = 0.8,
           title = "Grocery Stores") +
@@ -121,6 +189,8 @@ tm_shape(residential_polys) +
 # KDE
 
 ```{r}
+grocery_all <- st_transform(grocery_all, 32617)
+
 coords <- st_coordinates(grocery_all)
 
 # Define a window from Toronto bounding box
@@ -171,6 +241,42 @@ tm_shape(kde_raster) +
 
 
 ```
+
+```{r}
+kde_masked <- mask(kde_raster, vect(residential_polys))
+
+tm_shape(kde_masked) +
+  tm_raster(style = "quantile", palette = "YlOrRd", alpha = 0.7, title = "Store Density") +
+  tm_shape(residential_polys) +
+  #tm_borders(col = "grey30") +
+  tm_layout(title = "Grocery Store Density over Residential Areas")
+
+```
+
+```{r}
+# Create centroids from residential polygons
+res_centroids <- st_centroid(residential_polys) %>%
+  st_transform(32617)
+# Compute distance matrix to all stores
+dist_matrix <- st_distance(res_centroids, grocery_all)
+
+# Extract nearest distance per centroid
+res_centroids$nearest_dist <- apply(dist_matrix, 1, min)
+
+
+```
+
+```{r}
+
+underserved <- res_centroids %>%
+  filter(nearest_dist > 1000)
+
+```
+
+
+
+
+
 ```{r}
 toronto_admin <- opq(bbox = toronto_bb) |>
   add_osm_feature(key = "boundary", value = "administrative") |>
@@ -195,16 +301,46 @@ tm_shape(neighborhoods) +
   tm_layout(title = "Toronto Neighborhoods / Wards")
 
 ```
-
+ 
+# Mapping underserved spots
+ 
 ```{r}
-table(neighborhoods$admin_level)
+
+
+tmap_mode("plot")  # or "view" for interactive
+
+tm_shape(neighborhoods) +
+  tm_borders(col = "grey40", lwd = 1) +
+
+tm_shape(greenspace_polys) +
+  tm_fill(col = "darkseagreen3", alpha = 0.5, border.col = NA) +
+
+  
+tm_shape(commercial_building_polys) +
+  tm_fill(col = "goldenrod1", alpha = 0.3, border.col = NA) +
+
+tm_shape(residential_polys) +
+  tm_fill(col = "skyblue1", alpha = 0.3, border.col = NA) +
+
+tm_shape(underserved) +
+  tm_symbols(
+    shape = 22, col = "red", size = 0.3, 
+    border.col = "black", border.lwd = 0.8,
+    title = "Underserved >1km"
+  ) +
+
+tm_title("Food Access and Land Use in Toronto") +
+
+tm_layout(
+  legend.outside = TRUE,
+  frame = FALSE,
+  bg.color = "white",
+  title.size = 1.2
+)
+
 
 
 ```
-
-
-
-
-
-
+ 
+ 
 
