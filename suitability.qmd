@@ -1,0 +1,800 @@
+---
+title: "6500 Final Project"
+format: pdf
+editor: visual
+---
+
+# Load libraries
+
+```{r, echo=FALSE, include=FALSE}
+library(osmdata)
+library(sf)
+library(tmap)
+library(spatstat)
+library(terra)
+library(dplyr)
+library(readxl)
+library(opendatatoronto)
+```
+
+# Mapping Grocery stores and Residential Areas
+
+```{r}
+# Load Toronto administrative boundaries from OSM
+toronto_admin <- opq(bbox = getbb("Toronto, Ontario, Canada")) %>%
+  add_osm_feature(key = "admin_level", value = "6") %>%
+  add_osm_feature(key = "name", value = "Toronto") %>%
+  osmdata_sf()
+
+# Extract the boundary polygon and project it to EPSG:32617
+toronto_boundaries <- toronto_admin$osm_multipolygons %>%
+  filter(name == "Toronto") %>%
+  st_transform(32617)
+
+# Boundary box for querying grocery stores
+toronto_bb <- st_bbox(st_transform(toronto_boundaries, 4326))
+# grocery store locations from OSM within the boundary box
+grocery_osm <- opq(bbox = toronto_bb) %>%
+  add_osm_feature(key = "shop", value = c("supermarket", "convenience", "greengrocer")) %>%
+  osmdata_sf()
+```
+
+```{r}
+# Extract point features (some stores are points, some are polygons)
+# Polygons are treated as their centroids
+grocery_pts <- grocery_osm$osm_points
+grocery_polys <- st_centroid(grocery_osm$osm_polygons)
+
+# Combine
+grocery_all <- bind_rows(
+  grocery_pts %>% select(osm_id, name, geometry),
+  grocery_polys %>% select(osm_id, name, geometry)
+)
+
+```
+
+```{r}
+# Create sf polygon from bbox for all grocery store points
+bbox_sf <- st_as_sfc(st_bbox(grocery_all)) %>%
+  st_transform(32617)  # UTM for Toronto
+
+# Major roads in Toronto
+streets_osm <- opq(bbox = bbox_sf %>% st_transform(4326) %>% st_bbox()) %>%
+  add_osm_feature(key = "highway", 
+                  value = c("primary", "secondary", "tertiary", "residential")) %>%
+  osmdata_sf()
+
+# Project roads to UTM
+streets_utm <- st_transform(streets_osm$osm_lines, 32617)
+
+# Rivers and streams
+water_osm <- opq(bbox = bbox_sf %>% st_transform(4326) %>% st_bbox()) %>%
+  add_osm_feature(key = "waterway", value = c("river", "stream")) %>%
+  osmdata_sf()
+# Project rivers and streams to UTM
+rivers_utm <- st_transform(water_osm$osm_lines, 32617)
+
+# Green spaces, parks
+greenspaces_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "leisure", value = "park") |>
+  osmdata_sf()
+
+greenspace_polys <- bind_rows(
+  greenspaces_osm$osm_polygons,
+  greenspaces_osm$osm_multipolygons
+) |>
+  st_transform(32617) |>
+  select(osm_id, name, geometry) |>
+  distinct()
+
+# Residential areas
+residential_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "landuse", value = "residential") |>
+  osmdata_sf()
+
+residential_polys <- bind_rows(
+  residential_osm$osm_polygons,
+  residential_osm$osm_multipolygons
+) |>
+  st_make_valid() |>           
+  st_transform(32617) |>
+  select(osm_id, geometry) |>
+  distinct()
+
+residential_polys <- residential_polys |> 
+  filter(!st_is_empty(geometry)) |> 
+  filter(st_is_valid(geometry))
+
+# Commercial areas
+commercial_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "landuse", value = c("commercial", "industrial", "retail")) |>
+  osmdata_sf()
+
+commercial_building_osm <- opq(bbox = bbox_sf |> st_transform(4326) |> st_bbox()) |>
+  add_osm_feature(key = "building", value = c("commercial", "office")) |>
+  osmdata_sf()
+
+commercial_polys <- bind_rows(
+  commercial_osm$osm_polygons,
+  commercial_osm$osm_multipolygons
+) |>
+  st_make_valid() |>           
+  st_transform(32617) |>
+  select(osm_id, geometry) |>
+  distinct()
+
+commercial_building_polys <- bind_rows(
+  commercial_building_osm$osm_polygons,
+  commercial_building_osm$osm_multipolygons
+) |>
+  st_make_valid() |>           
+  st_transform(32617) |>
+  select(osm_id, geometry) |>
+  distinct()
+
+```
+
+```{r}
+toronto_admin <- opq(bbox = toronto_bb) |>
+  add_osm_feature(key = "boundary", value = "administrative") |>
+  osmdata_sf()
+
+# Combine multipolygons and polygons
+admin_all <- bind_rows(
+  toronto_admin$osm_multipolygons,
+  toronto_admin$osm_polygons
+)
+
+# Filter neighborhood-level boundaries
+neighborhoods <- admin_all |>
+  filter(admin_level %in% c("9"), name != "Toronto") |>
+  st_transform(32617)  # Match your other data
+```
+
+```{r}
+# Plot grocery stores in Toronto
+tmap_mode("plot")
+
+tm_shape(neighborhoods) +
+  tm_borders(col = "grey40", lwd = 1) +
+tm_shape(bbox_sf) +
+  tm_borders(lwd = 1.5, col = "black", alpha = 0.2) +
+
+  tm_shape(rivers_utm) +
+  tm_lines(col = "lightblue", lwd = 0.8) +
+
+  tm_shape(streets_utm) +
+  tm_lines(col = "grey80", lwd = 0.6) +
+  
+  tm_shape(greenspace_polys) +
+   tm_polygons(col = "darkgreen", 
+              fill_alpha = 0.6, 
+              border.col = "darkgreen", 
+              lwd = 0.6) +
+
+
+
+tm_shape(residential_polys) +
+  tm_fill(col = "grey20", alpha = 0.4, border.col = NA) +
+  
+   tm_shape(commercial_polys) +
+  tm_fill(col = "yellow",alpha = 0.4, border.col = NA) +
+  
+   tm_shape(commercial_building_polys) +
+  tm_fill(col = "yellow",alpha = 0.4, border.col = NA) +
+  
+
+  tm_shape(grocery_all) +
+  tm_dots(col = "red",
+          size = 0.1,
+          border.col = "black",
+          fill.alpha = 0.8,
+          title = "Grocery Stores") +
+
+  tm_layout(
+    title = "Grocery Store Locations in Toronto",
+    title.size = 1.2,
+    legend.position = c("right", "top"),
+    frame = FALSE,
+    bg.color = "white"
+  )
+
+```
+
+```{r}
+# Clip elements to neighbourhood boundaries
+neighborhoods <- st_make_valid(neighborhoods)
+neighborhoods <- st_transform(neighborhoods, 32617)
+
+
+# Clip roads
+streets_clipped <- st_intersection(streets_utm, neighborhoods)
+
+# Clip rivers
+rivers_clipped <- st_intersection(rivers_utm, neighborhoods)
+
+# Clip greenspace
+greenspace_clip <- greenspace_polys |> 
+  st_make_valid() |>
+  st_intersection(neighborhoods)
+
+# Clip residential
+residential_clip <- residential_polys |> 
+  st_make_valid() |> 
+  st_intersection(neighborhoods)
+
+# Clip commercial
+commercial_clip <- commercial_polys |> 
+  st_make_valid() |> 
+  st_intersection(neighborhoods)
+
+commercial_building_clip <- commercial_building_polys |> 
+  st_make_valid() |> 
+  st_intersection(neighborhoods) 
+
+grocery_all <- st_transform(grocery_all, 32617)
+
+grocery_clipped <- st_intersection(grocery_all, neighborhoods)
+```
+
+```{r}
+# Plot grocery stores after clipping elements (make sure it's in the Toronto boundary)
+tmap_mode("plot")
+grocery_clipped$category <- "Grocery Store"
+
+tm_shape(neighborhoods) +
+  tm_borders(lwd = 1, col = "black") +
+
+tm_shape(residential_clip) +
+  tm_fill(col = "skyblue", alpha = 0.3, title = "Residential") +
+
+tm_shape(commercial_clip) +
+  tm_fill(col = "orange", alpha = 0.3, title = "Commercial Land Use") +
+
+tm_shape(commercial_building_clip) +
+  tm_fill(col = "darkorange", alpha = 0.5, title = "Commercial Buildings") +
+
+tm_shape(greenspace_clip) +
+  tm_polygons(col = "darkgreen", 
+              fill_alpha = 0.6, 
+              border.col = "darkgreen", 
+              lwd = 0.6) +
+
+tm_shape(streets_clipped) +
+  tm_lines(col = "gray60", lwd = 0.5, title = "Roads") +
+
+tm_shape(rivers_clipped) +
+  tm_lines(col = "lightblue", lwd = 0.7, title = "Waterways") +
+  
+  tm_shape(grocery_clipped) +
+  tm_symbols(col = "category", shape = 21, size = 0.2, 
+             border.col = "red", 
+             title = "Grocery Stores") +
+
+tm_title("Food Access and Land Use in Toronto") +
+tm_layout(
+  legend.outside = TRUE,
+  legend.outside.position = "right",
+  legend.text.size = 0.7,
+  legend.title.size = 0.9,
+  legend.bg.color = "white",
+  legend.frame = TRUE,
+  frame = FALSE,
+  bg.color = "white"
+)
+```
+
+```{r}
+# Plot with categorical attribute as colors
+# Add dummy categories for legend mapping
+residential_clip$type <- "Residential"
+commercial_clip$type <- "Commercial Land Use"
+commercial_building_clip$type <- "Commercial Buildings"
+greenspace_clip$type <- "Greenspaces"
+grocery_clipped$category <- "Grocery Store"
+
+tmap_mode("plot")
+
+tm_shape(neighborhoods) +
+  tm_borders(lwd = 1, col = "black") +
+
+tm_shape(residential_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "skyblue",
+    fill.alpha = 0.3,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(commercial_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "orange",
+    fill.alpha = 0.3,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(commercial_building_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "darkorange",
+    fill.alpha = 0.5,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(greenspace_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "darkgreen",
+    fill.alpha = 0.6,
+    border.col = "darkgreen",
+    lwd = 0.6,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(grocery_clipped) +
+  tm_symbols(
+    col = "category",
+    palette = "red",
+    shape = 21,
+    size = 0.2,
+    border.col = "black",
+    fill.alpha = 0.9,
+    title.col = "Grocery Stores"
+  ) +
+
+tm_title("Stores and Land Use in Toronto") +
+
+tm_layout(
+  legend.outside = TRUE,
+  legend.outside.position = "right",
+  legend.text.size = 0.7,
+  legend.title.size = 0.9,
+  legend.bg.color = "white",
+  legend.frame = TRUE,
+  frame = FALSE,
+  bg.color = "white"
+)
+
+
+```
+
+# KDE
+
+```{r}
+# Extract coordinates from grocery store points
+coords <- st_coordinates(grocery_all)
+
+# Define a window from Toronto bounding box
+study_win <- as.owin(bbox_sf)
+
+# Create ppp object
+grocery_ppp <- ppp(x = coords[,1], y = coords[,2], window = study_win)
+```
+
+```{r}
+# Quadrat test on grocery store point pattern
+quadrat_test <- quadrat.test(grocery_ppp, nx = 5, ny = 5)
+plot(grocery_ppp, main = "Quadrat Test")
+plot(quadrat_test, add = TRUE)
+print(quadrat_test)
+```
+
+```{r}
+K <- Kest(grocery_ppp)
+L <- Lest(grocery_ppp)
+
+plot(L, main = "L-Function for Grocery Store Pattern")
+abline(h = 0, col = "red", lty = 2)
+```
+
+```{r}
+# KDE of grocery store locations
+grocery_kde <- density.ppp(grocery_ppp, sigma = 800, edge = TRUE)
+
+# Convert to SpatRaster for visualization
+kde_raster <- rast(as.im(grocery_kde))
+crs(kde_raster) <- "EPSG:32617"
+
+# Plot
+tm_shape(kde_raster) +
+  tm_raster(style = "cont", palette = "YlOrRd", alpha = 0.6, title = "Store Density") +
+  tm_shape(grocery_all) +
+  tm_dots(col = "darkgreen", size = 0.04, border.col = "black", fill.alpha = 0.8) +
+  tm_layout(
+    title = "KDE of Grocery Stores",
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+```
+
+```{r}
+# Clipped plot
+
+# 1. Match CRS: transform neighborhoods to the raster's CRS
+neighborhoods_proj <- st_transform(neighborhoods, crs(kde_raster))
+
+# 2. Convert `sf` to `SpatVector` for masking
+neighborhoods_vect <- vect(neighborhoods_proj)
+
+# 3. Crop and mask
+kde_clipped <- mask(crop(kde_raster, neighborhoods_vect), neighborhoods_vect)
+tm_shape(kde_clipped) +
+  tm_raster(style = "cont", palette = "YlOrRd", alpha = 0.6, title = "Store Density") +
+
+tm_shape(grocery_clipped) +
+  tm_dots(col = "darkgreen", size = 0.04, border.col = "black", fill.alpha = 0.8) +
+
+tm_shape(neighborhoods) +
+  tm_borders(col = "grey40", lwd = 1) +
+
+tm_layout(
+  title = "KDE of Toronto Grocery Stores",
+  legend.outside = TRUE,
+  frame = FALSE
+)
+
+```
+
+```{r}
+kde_masked <- mask(kde_raster, vect(residential_polys))
+
+tm_shape(kde_masked) +
+  tm_raster(style = "quantile", palette = "YlOrRd", alpha = 0.7, title = "Store Density") +
+  tm_shape(residential_polys) +
+  #tm_borders(col = "grey30") +
+  tm_layout(title = "Grocery Store Density over Residential Areas")
+
+```
+
+```{r}
+# Create centroids from residential polygons
+res_centroids <- st_centroid(residential_polys) %>%
+  st_transform(32617)
+# Compute distance matrix to all stores
+dist_matrix <- st_distance(res_centroids, grocery_all)
+
+# Extract nearest distance per centroid
+res_centroids$nearest_dist <- apply(dist_matrix, 1, min)
+```
+
+```{r}
+underserved <- res_centroids %>%
+  filter(nearest_dist > 1000)
+```
+
+```{r}
+tmap_mode("plot")
+
+tm_shape(neighborhoods) +
+  tm_borders(lwd = 1, col = "black") +
+  tm_text("name", size = 0.5, auto.placement = TRUE) +
+  tm_layout(title = "Toronto Neighborhoods / Wards")
+```
+
+# Mapping underserved spots
+
+```{r}
+# Make sure everything uses the same CRS (match to wards)
+crs_target <- st_crs(neighborhoods)
+
+underserved   <- st_transform(underserved, crs_target)
+residential_polys   <- st_transform(residential_polys, crs_target)
+commercial_building_polys    <- st_transform(commercial_building_polys, crs_target)
+greenspace_polys         <- st_transform(greenspace_polys, crs_target)
+
+greenspace_polys <- st_make_valid(greenspace_polys)
+
+
+grocery_clipped   <- st_intersection(underserved, neighborhoods)
+residential_clip  <- st_intersection(residential_polys, neighborhoods)
+commercial_clip   <- st_intersection(commercial_building_polys, neighborhoods)
+greenspace_clip        <- st_intersection(greenspace_polys, neighborhoods)
+
+
+
+
+tmap_mode("plot")  # or "view" for interactive
+
+tm_shape(neighborhoods) +
+  tm_borders(col = "grey40", lwd = 1) +
+
+tm_shape(greenspace_clip) +
+  tm_fill(col = "darkseagreen3", alpha = 0.5, border.col = NA) +
+
+  
+tm_shape(commercial_clip) +
+  tm_fill(col = "goldenrod1", alpha = 0.3, border.col = NA) +
+
+tm_shape(residential_clip) +
+  tm_fill(col = "skyblue1", alpha = 0.3, border.col = NA) +
+
+tm_shape(grocery_clipped) +
+  tm_symbols(
+    shape = 22, col = "red", size = 0.3, 
+    border.col = "black", border.lwd = 0.8,
+    title = "Underserved >1km"
+  ) +
+
+tm_title("Food Access and Land Use in Toronto") +
+
+tm_layout(
+  legend.outside = TRUE,
+  frame = FALSE,
+  bg.color = "white",
+  title.size = 1.2
+)
+```
+
+```{r}
+residential_clip$type <- "Residential"
+commercial_clip$type <- "Commercial Land Use"
+commercial_building_clip <- commercial_clip  # if separate building layer desired
+commercial_building_clip$type <- "Commercial Buildings"
+greenspace_clip$type <- "Greenspaces"
+grocery_clipped$category <- "Grocery Store"
+underserved$category <- "Underserved Grocery Store"
+underserved   <- st_intersection(underserved, neighborhoods)
+
+# Map
+tmap_mode("plot")
+
+tm_shape(neighborhoods) +
+  tm_borders(lwd = 1, col = "black") +
+
+tm_shape(residential_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "skyblue",
+    fill.alpha = 0.3,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(commercial_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "orange",
+    fill.alpha = 0.3,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(commercial_building_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "darkorange",
+    fill.alpha = 0.5,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(greenspace_clip) +
+  tm_polygons(
+    col = "type",
+    palette = "darkgreen",
+    fill.alpha = 0.6,
+    border.col = "darkgreen",
+    lwd = 0.6,
+    title.col = "Land Use"
+  ) +
+
+tm_shape(underserved) +
+  tm_symbols(
+    col = "category",
+    palette = "red",
+    shape = 21,
+    size = 0.2,
+    border.col = "black",
+    fill.alpha = 0.9,
+    title.col = "Grocery Stores"
+  ) +
+
+tm_title("Underserved Stores and Land Use in Toronto") +
+
+tm_layout(
+  legend.outside = TRUE,
+  legend.outside.position = "right",
+  legend.text.size = 0.7,
+  legend.title.size = 0.9,
+  legend.bg.color = "white",
+  legend.frame = TRUE,
+  frame = FALSE,
+  bg.color = "white"
+)
+```
+
+# census
+
+```{r}
+# Load the Excel sheet (check which sheet has the data)
+sheet_names <- excel_sheets("median_income_wards.xlsx")
+ward_data <- read_excel("median_income_wards.xlsx", sheet = sheet_names[1])
+
+ward_data
+```
+
+```{r}
+neighborhoods$name
+
+neighborhoods_data <- neighborhoods %>%
+  left_join(ward_data, by = c("name" = "ward_name"))
+
+
+
+neighborhoods_data <- neighborhoods_data %>%
+  mutate(
+    area_sqm = area * 1e6,  # convert sq km to sq meters
+    res_density = pop / area_sqm
+  )
+```
+
+```{r}
+# Centroids of neighborhoods
+neigh_centroids <- st_centroid(neighborhoods_data)
+
+# Create 500m buffers around centroids
+buffers <- st_buffer(neigh_centroids, dist = 500)
+
+# Count grocery stores within each buffer
+store_counts <- lengths(st_intersects(buffers, grocery_all))
+
+# Add store counts and normalize to get store_density_score
+neighborhoods_data <- neighborhoods_data %>%
+  mutate(
+    store_count = store_counts,
+    store_density_score = (store_count - min(store_count)) / (max(store_count) - min(store_count))
+  )
+
+# 4. Create competition score: inverted store density
+neighborhoods_data <- neighborhoods_data %>%
+  mutate(store_competition_score = 1 - store_density_score)
+
+# 5. Transform neighborhoods to raster CRS (match KDE raster CRS)
+neighborhoods_data <- st_transform(neighborhoods_data, crs(kde_raster))
+
+# 6. Convert neighborhoods sf to SpatVector for terra rasterize
+neigh_vect <- vect(neighborhoods_data)
+
+# 7. Rasterize layers to align with KDE raster
+
+income_raster <- rasterize(neigh_vect, kde_raster, field = "income", fun = mean)
+res_density_raster <- rasterize(neigh_vect, kde_raster, field = "res_density", fun = mean)
+store_competition_raster <- rasterize(neigh_vect, kde_raster, field = "store_competition_score", fun = mean)
+
+# 8. Normalize function for raster layers
+normalize <- function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+kde_norm <- app(kde_raster, normalize)
+income_norm <- app(income_raster, normalize)
+res_density_norm <- app(res_density_raster, normalize)
+store_competition_norm <- app(store_competition_raster, normalize)
+
+# 9. Calculate opportunity score (equal weights example)
+w_kde <- 0.125
+w_income <- 0.4375
+w_res_density <- 0.25
+w_competition <- 0.1875
+suitability_score <- (w_kde * kde_norm) + (w_income * income_norm) + (w_res_density * res_density_norm) + (w_competition * store_competition_norm)
+
+# 10. Visualize opportunity score
+tm_shape(suitability_score) +
+  tm_raster(palette = "viridis", title = "Suitability Score") +
+  tm_layout(legend.outside = TRUE)
+```
+
+# Rank
+```{r}
+# Get raster values and coordinates as a data.frame
+scores_df <- as.data.frame(suitability_score, xy = TRUE, na.rm = TRUE)
+
+# Sort descending by score
+top_scores <- scores_df %>%
+  arrange(desc(lyr.1)) %>%
+  slice_head(n = 50)  # top 100 pixels
+
+# Optionally convert top pixels to spatial points for mapping or analysis
+top_points <- st_as_sf(top_scores, coords = c("x", "y"), crs = crs(suitability_score))
+
+# Plot raster + top points + optional neighborhoods boundaries
+tm_shape(suitability_score) +
+  tm_raster(palette = "viridis", title = "Opportunity Score") +
+  tm_shape(top_points) +
+  tm_symbols(col = "red", size = 0.2, border.col = "black", shape = 21,
+             title = "Top Opportunity Points") +
+  tm_shape(neighborhoods) +
+  tm_borders(col = "grey50", lwd = 0.5) +
+  tm_layout(legend.outside = TRUE, main.title = "Top Grocery Store Opportunity Locations")
+
+```
+
+```{r}
+
+tm_shape(suitability_score) +
+  tm_raster(palette = "viridis", title = "Opportunity Score") +
+tm_shape(grocery_all) +
+  tm_dots(col = "red", size = 0.1, border.col = "black", title = "Existing Stores") +
+tm_layout(legend.outside = TRUE)
+```
+```{r}
+st_crs(joined) == st_crs(neighborhoods_data)
+# Convert opportunity raster to points
+opportunity_pts <- as.points(opportunity_score, na.rm = TRUE)
+
+# Spatial join points to neighborhoods
+joined <- st_join(st_as_sf(opportunity_pts), neighborhoods_data, join = st_within)
+joined$layer <- as.numeric(joined$layer)
+# Calculate mean opportunity score per neighborhood
+neighborhood_scores <- joined %>%
+  group_by(name) %>%
+  summarise(mean_opportunity = mean(layer, na.rm = TRUE)) %>%
+  arrange(desc(mean_opportunity))
+
+head(neighborhood_scores)
+```
+
+
+
+```{r}
+resources <- list_package_resources("5e7a8234-f805-43ac-820f-03d7c360b588")
+# Load GeoJSON resource by id
+wards <- get_resource("737b29e0-8329-4260-b6af-21555ab24f28")  # full id needed, use full id string
+
+# Check the class and CRS
+print(class(wards))
+print(st_crs(wards))
+
+# Transform CRS if needed (e.g., to UTM zone 17N for Toronto)
+wards_utm <- st_transform(wards, 32617)
+```
+```{r}
+library(exactextractr)
+ward_scores <- exact_extract(suitability_score, wards_utm, 'mean')
+
+# Add to wards data frame
+wards_utm$suitability_score <- ward_scores
+
+# Rank wards by suitability_score
+wards_utm <- wards_utm %>%
+  arrange(desc(suitability_score)) %>%
+  mutate(rank = row_number())
+```
+
+
+```{r}
+tmap_mode("plot")
+
+tm_shape(wards_utm) +
+  tm_polygons(
+    col = "suitability_score",
+    palette = "viridis",
+    style = "quantile",
+    title = "Suitability Score",
+    border.col = "black",
+    lwd = 0.5
+  ) +
+  tm_text(
+    "rank",
+    size = 0.6,
+    col = "black",
+    shadow = TRUE,
+    auto.placement = TRUE
+  ) +
+  tm_layout(
+    title = "Suitability Score and Rank by Toronto Wards",
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+```
+
+```{r}
+top_neighborhoods <- wards_utm %>%
+  st_drop_geometry() %>%      # drop spatial info for easier viewing
+  arrange(desc(suitability_score)) %>%
+  select(AREA_NAME, suitability_score, rank) %>%
+  head(5)                    # top 5, adjust as needed
+
+print(top_neighborhoods)
+```
+
+
+
